@@ -1,5 +1,10 @@
 # Contributing
 
+Start with [AGENTS.md](AGENTS.md), the [architecture](docs/ARCHITECTURE.md),
+and the [maintenance and publication procedure](docs/MAINTENANCE.md).
+Update [CHANGELOG.md](CHANGELOG.md) and [KNOWN_ISSUES.md](KNOWN_ISSUES.md)
+when behavior or validation status changes.
+
 Run the Node and Python test commands in the README before proposing a change.
 Keep protocol checksums, framing, and supported limits consistent across both
 implementations. Python uses four spaces and snake_case; JavaScript uses two

@@ -31,7 +31,7 @@ snapshots are superseded by this sanitized source distribution.
   Version 1.0.3 publishes observed climate state and separate requested-power
   diagnostics; a command ACK alone does not establish physical application.
 - One stove per broker: MQTT client ID, topics, and device ID are fixed. The
-  archive's generic identifier is not automatic multi-device support.
+  public export's generic identifier is not automatic multi-device support.
 - Retained command replay protection and richer command-failure diagnostics need
   additional work. Do not retain commands on `duepi_stove/cmd/#`.
 - The manifest lists aarch64/amd64/armv7 but Dockerfile defaults to aarch64.

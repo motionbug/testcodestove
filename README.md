@@ -54,6 +54,11 @@ implement the Python bridge's startup power recovery.
 
 ## Source and tests
 
+Maintainers and new coding sessions: start with [AGENTS.md](AGENTS.md),
+[architecture and command flows](docs/ARCHITECTURE.md), and the
+[safe update/publishing workflow](docs/MAINTENANCE.md). See [CHANGELOG.md](CHANGELOG.md)
+for the implementation history and current validation limits.
+
 - `duepi_stove_addon/`: Python TCP/MQTT bridge and Home Assistant app packaging.
 - `dpremote/stove.js`: standalone Node.js controller and protocol codec.
 - `tests/`: simulated TCP peers and synthetic protocol vectors.
