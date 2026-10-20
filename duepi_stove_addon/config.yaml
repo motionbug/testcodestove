@@ -1,0 +1,44 @@
+name: "Duepi Stove Local MITM & MQTT Controller"
+version: "1.0.3"
+slug: "duepi_stove_mitm"
+description: "Local TCP relay / MITM proxy and MQTT Climate Discovery bridge for Duepi (MyDPremote) pellet stoves."
+url: "https://github.com/motionbug/testcodestove"
+arch:
+  - aarch64
+  - amd64
+  - armv7
+init: false
+startup: services
+boot: auto
+services:
+  - mqtt:want
+ports:
+  3000/tcp: 3000
+ports_description:
+  3000/tcp: "Duepi Cloud Relay TCP port (point duepiwebserver.com here via local DNS)"
+options:
+  device_code: ""
+  stove_ip: ""
+  listen_port: 3000
+  poll_interval: 15
+  upstream_relay_enabled: false
+  upstream_relay_host: "80.241.219.49"
+  upstream_relay_port: 3000
+  mqtt_host: "core-mosquitto"
+  mqtt_port: 1883
+  mqtt_user: ""
+  mqtt_password: ""
+  discovery_prefix: "homeassistant"
+schema:
+  device_code: password
+  stove_ip: str
+  listen_port: port
+  poll_interval: "int(5,300)"
+  upstream_relay_enabled: bool
+  upstream_relay_host: str?
+  upstream_relay_port: port?
+  mqtt_host: str
+  mqtt_port: port
+  mqtt_user: str?
+  mqtt_password: password?
+  discovery_prefix: str

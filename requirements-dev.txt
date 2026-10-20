@@ -1,0 +1,3 @@
+# Python bridge regression tests; Node tests use the built-in node:test runner.
+cryptography>=42,<51
+paho-mqtt>=2,<3
