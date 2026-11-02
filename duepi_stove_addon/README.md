@@ -14,6 +14,7 @@ Local, cloud-free TCP relay and MQTT Discovery climate bridge for **Duepi Group*
   - Selecting **Power / Fan Levels (`P1` – `P5`)**
   - Diagnostic JSON attributes for observed power, requested power, and command outcome
   - Coordinated polling and one guarded startup power resend (1.0.3; awaiting hardware validation)
+  - Log warning when replies point to a wrong device code (1.0.4)
 
 ## Required configuration
 

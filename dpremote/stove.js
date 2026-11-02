@@ -20,6 +20,8 @@ const path = require('path');
 
 const KEY_MASK_HEX = '23FADC18A422678312C86AC29281AC01';
 const DEFAULT_PCAP = path.join(__dirname, 'relay.pcap');
+// Checksum failures tolerated before any valid reply before blaming the device code.
+const WRONG_CODE_FRAME_THRESHOLD = 3;
 
 function deriveKey(code) {
   const cleanCode = code.replace(/#+$/, '');
@@ -294,6 +296,11 @@ function startServer({ tcpPort = 3000, httpPort = 8080, pcapPath = DEFAULT_PCAP,
     stoveSocket = sock;
     console.log(`[TCP] Stove connected from ${peer}`);
     let buffer = '';
+    // Checksum failures before any valid reply mean a different key: almost
+    // always a wrong device code. Report once per connection, never the code.
+    let rejectedFrames = 0;
+    let acceptedReply = false;
+    let wrongCodeReported = false;
 
     sock.on('data', (chunk) => {
       if (sock !== stoveSocket || sock.destroyed) return;
@@ -315,7 +322,17 @@ function startServer({ tcpPort = 3000, httpPort = 8080, pcapPath = DEFAULT_PCAP,
         buffer = buffer.slice(amp + 1);
         try {
           const dec = decryptFrame(frame, key);
-          if (!dec.valid || !/^[0-9A-Fa-f]{6}$/.test(dec.body)) continue;
+          if (!dec.valid || !/^[0-9A-Fa-f]{6}$/.test(dec.body)) {
+            rejectedFrames++;
+            if (!acceptedReply && !wrongCodeReported && rejectedFrames >= WRONG_CODE_FRAME_THRESHOLD) {
+              wrongCodeReported = true;
+              console.warn(`[TCP] Stove ${peer} sent encrypted frames that all fail the checksum `
+                + `(rejected_frames=${rejectedFrames}, no valid reply on this connection). `
+                + 'The configured device code (DUEPI_CODE) is most likely wrong.');
+            }
+            continue;
+          }
+          acceptedReply = true;
           if (pendingReply && pendingReply.socket === sock) {
             const pending = pendingReply;
             pendingReply = null;

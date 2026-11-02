@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.4 — 2026-11-02
+
+- Log one warning per connection when three replies fail the checksum before any
+  valid reply. This almost always means a wrong device code, which previously
+  appeared only as poll timeouts. The warning never includes the code, key, or
+  frame contents. Same diagnostic in the standalone Node controller.
+- Document how to find your device code by capturing your own MyDPremote app's
+  `master:<code>#` login (iPhone, Android, or router), and what is safe to share.
+- Add regressions: baseline now 19 Node tests and 32 Python tests, with Paho
+  1.6.1 and 2.1.0 coverage. Protocol, timeouts, and power handling are unchanged.
+
 ## 1.0.3 — 2026-10-20
 
 - Separate requested power from observed readback; command ACK no longer publishes

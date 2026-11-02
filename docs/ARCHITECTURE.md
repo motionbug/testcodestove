@@ -1,6 +1,6 @@
 # Architecture and command flows
 
-Current app: **1.0.3**. Read [known issues](../KNOWN_ISSUES.md) for validation
+Current app: **1.0.4**. Read [known issues](../KNOWN_ISSUES.md) for validation
 limits and [maintenance](MAINTENANCE.md) before changing or publishing code.
 
 ## Connection and discovery

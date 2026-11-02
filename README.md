@@ -2,7 +2,7 @@
 
 Experimental local control for Duepi/MyDPremote pellet stoves using the existing
 Wi-Fi module. This repository contains the Home Assistant MQTT app and an
-alternative standalone Node.js TCP/HTTP controller. Current source: **1.0.3**.
+alternative standalone Node.js TCP/HTTP controller. Current source: **1.0.4**.
 
 ## Status
 
@@ -10,7 +10,8 @@ Live temperature readings and Heat/Off have worked on one installation.
 Intermittent timeouts and reverting power selections remain under investigation.
 Version 1.0.3 coordinates polling and commands, separates requested power from
 readback, and permits one guarded startup power resend. Those changes have
-offline regression coverage and still need physical-stove validation.
+offline regression coverage and still need physical-stove validation. Version
+1.0.4 logs a clear warning when replies indicate a wrong device code.
 See [known issues](KNOWN_ISSUES.md) before use. This is an experimental community
 project, unaffiliated with Duepi or Home Assistant.
 
@@ -25,6 +26,20 @@ MQTT device page with temperature telemetry and recent activity. The history
 also shows the intermittent availability issue described above.
 
 ![Home Assistant MQTT device page](docs/images/home-assistant-device.png)
+
+## What you need, and what is safe to share
+
+Each user needs only **their own stove's 10-character device code**. The app
+derives the stove's encryption key from it using a fixed mask
+(`23FADC18A422678312C86AC29281AC01`) that is the same for every stove and is
+already built in. The guide explains [how to find your code](duepi_stove_addon/DOCS.md#1a-find-your-device-code)
+by capturing your own MyDPremote app's login.
+
+All source code, the fixed mask, and the synthetic test vectors (code `0123456789`
+in `tests/`) are public. Keep your device code, the key derived from it, packet
+captures, `options.json`, and raw logs private. See
+[what is safe to share](duepi_stove_addon/DOCS.md#1b-what-is-safe-to-share) and
+[SECURITY.md](SECURITY.md).
 
 ## Home Assistant installation
 
@@ -71,7 +86,7 @@ python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-The export passes 17 Node tests and 29 Python tests; Python tests have also been
+The export passes 19 Node tests and 32 Python tests; Python tests have also been
 run with Paho MQTT 1.6.1 and 2.1.0. These do not replace Home Assistant packaging
 checks or live appliance testing.
 
@@ -85,7 +100,7 @@ verification rules. Florian's complete MIT notice is preserved in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and in the add-on folder.
 
 This project's code is available under the [MIT license](LICENSE).
-Use the source tree for 1.0.3; GitHub's **Code → Download ZIP** provides a source archive.
+Use the source tree for 1.0.4; GitHub's **Code → Download ZIP** provides a source archive.
 
 ## Privacy and contributions
 

@@ -1,12 +1,13 @@
 # Validation status and known issues
 
-Snapshot: 2026-10-20, version 1.0.3. Includes Paho compatibility, diagnostic
-logging, coordinated polling, and guarded startup power recovery. Earlier ZIP
+Snapshot: 2026-11-02, version 1.0.4. Includes Paho compatibility, diagnostic
+logging, coordinated polling, guarded startup power recovery, and a wrong
+device code warning. Earlier ZIP
 snapshots are superseded by this sanitized source distribution.
 
 ## Verified evidence
 
-- 17 Node tests and 29 Python tests; Python suite exercised with Paho 1.6.1 and 2.1.0.
+- 19 Node tests and 32 Python tests; Python suite exercised with Paho 1.6.1 and 2.1.0.
 - A private reference capture previously decoded with 109/109 valid checksums.
   It is intentionally excluded from this distribution.
 - One user installation built/started the Home Assistant app, connected to MQTT,

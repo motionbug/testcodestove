@@ -15,12 +15,13 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 function setup(ip = '192.0.2.10') {
   let tcp, http;
   const timers = new Set();
+  const warnings = [];
   const sandbox = {
     require: name => name === 'net' ? { ...require('net'), createServer: cb => { tcp = cb; return { listen() {} }; } }
       : name === 'http' ? { createServer: cb => { http = cb; return { listen() {} }; } } : require(name),
     module: { exports: {} }, __dirname: path.resolve(__dirname, '../dpremote'),
     process: { env: { DUEPI_CODE: CODE, DUEPI_STOVE_IP: ip } }, Buffer, URL,
-    console: { log() {}, error() {}, warn() {} },
+    console: { log() {}, error() {}, warn: msg => warnings.push(String(msg)) },
     setTimeout: fn => { timers.add(fn); return fn; }, clearTimeout: fn => timers.delete(fn),
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../dpremote/stove.js'), 'utf8') + '\nstartServer();', sandbox);
@@ -40,12 +41,11 @@ function setup(ip = '192.0.2.10') {
     http({ method, url }, res);
     return done;
   }
-  return { connect, request, expire: () => { for (const fn of [...timers]) fn(); } };
+  return { connect, request, warnings, expire: () => { for (const fn of [...timers]) fn(); } };
 }
-function reply(body = '000000', checksum) {
+function reply(body = '000000', checksum, frameKey = key, iv = Buffer.alloc(16)) {
   const payload = body + (checksum ?? codec.checksumHex(body));
-  const iv = Buffer.alloc(16);
-  const cipher = crypto.createCipheriv('aes-128-cbc', key, iv);
+  const cipher = crypto.createCipheriv('aes-128-cbc', frameKey, iv);
   cipher.setAutoPadding(false);
   return Buffer.from('\x1b' + Buffer.concat([iv, cipher.update(Buffer.from(payload.padEnd(16, '\0'), 'latin1')), cipher.final()]).toString('base64') + '&', 'latin1');
 }
@@ -102,6 +102,28 @@ test('corrupt and non-hex replies cannot resolve a request', async () => {
   socket.emit('data', Buffer.concat([reply('000000', '00'), reply('ZZZZZZ')]));
   await tick(); assert.equal(done, false);
   socket.emit('data', reply()); assert.equal((await result).status, 200);
+});
+test('wrong device code is reported once per connection without credentials', async () => {
+  const otherCode = '9876543210', otherKey = codec.deriveKey(otherCode);
+  const stray = n => Buffer.concat([...Array(n)].map((_, i) => reply('000000', undefined, otherKey, Buffer.alloc(16, i))));
+  const app = setup(), socket = app.connect();
+  socket.emit('data', stray(2));
+  assert.deepEqual(app.warnings, []);
+  socket.emit('data', stray(4));
+  const hits = app.warnings.filter(w => w.includes('device code'));
+  assert.equal(hits.length, 1);
+  assert.match(hits[0], /rejected_frames=3/);
+  for (const secret of [CODE, otherCode, key.toString('hex'), otherKey.toString('hex')]) assert.ok(!hits[0].includes(secret));
+  socket.destroy();
+  const next = app.connect();
+  next.emit('data', stray(3));
+  assert.equal(app.warnings.filter(w => w.includes('device code')).length, 2);
+});
+test('corrupt replies after a valid reply do not blame the device code', async () => {
+  const app = setup(), socket = app.connect(), result = app.request('/api/power?level=1');
+  await tick(); socket.emit('data', reply()); assert.equal((await result).status, 200);
+  socket.emit('data', Buffer.concat([...Array(5)].map((_, i) => reply('000000', '00', key, Buffer.alloc(16, i)))));
+  assert.equal(app.warnings.filter(w => w.includes('device code')).length, 0);
 });
 test('oversized incomplete frames disconnect the client', () => {
   const app = setup(), socket = app.connect();

@@ -70,10 +70,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         return task
 
-    def frame(self, body='000000', checksum=None):
+    def frame(self, body='000000', checksum=None, code=CODE, iv=bytes(16)):
         payload = (body + (checksum if checksum is not None else bridge.duepi_checksum(body))).encode().ljust(16, b'\0')
-        iv = bytes(16)
-        cipher = Cipher(algorithms.AES(bridge.derive_key(CODE)), modes.CBC(iv)).encryptor()
+        cipher = Cipher(algorithms.AES(bridge.derive_key(code)), modes.CBC(iv)).encryptor()
         return b'\x1b' + base64.b64encode(iv + cipher.update(payload) + cipher.finalize()) + b'&'
 
     async def test_all_fragment_boundaries(self):
@@ -178,6 +177,49 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(task.done())
         reader.feed_data(self.frame())
         self.assertEqual(await task, '000000')
+
+    def warnings(self, mock_warning):
+        return [call.args[0] % call.args[1:] for call in mock_warning.call_args_list]
+
+    async def test_wrong_device_code_is_reported_once_without_credentials(self):
+        reader, _ = await self.connect()
+        task = await self.command()
+        other_code = '9876543210'
+        # Replies from a stove whose code differs from the configured one.
+        stray = [self.frame(code=other_code, iv=bytes([n]) * 16) for n in range(6)]
+        with patch.object(bridge.log, 'warning') as warning:
+            reader.feed_data(b''.join(stray[:2]))
+            await asyncio.sleep(0)
+            self.assertEqual(self.warnings(warning), [])
+            reader.feed_data(b''.join(stray[2:]))
+            await asyncio.sleep(0)
+        messages = [m for m in self.warnings(warning) if 'device_code' in m]
+        self.assertEqual(len(messages), 1, self.warnings(warning))
+        self.assertIn('rejected_frames=3', messages[0])
+        for secret in (CODE, other_code, bridge.derive_key(CODE).hex(), bridge.derive_key(other_code).hex()):
+            self.assertNotIn(secret, messages[0])
+        self.assertFalse(task.done())
+
+    async def test_occasional_corrupt_reply_after_valid_reply_does_not_blame_code(self):
+        reader, _ = await self.connect()
+        task = await self.command()
+        reader.feed_data(self.frame())
+        self.assertEqual(await task, '000000')
+        with patch.object(bridge.log, 'warning') as warning:
+            reader.feed_data(b''.join(self.frame(checksum='00', iv=bytes([n]) * 16) for n in range(5)))
+            await asyncio.sleep(0)
+        self.assertFalse([m for m in self.warnings(warning) if 'device_code' in m])
+
+    async def test_wrong_code_warning_is_per_connection(self):
+        for _ in range(2):
+            reader, _ = await self.connect()
+            with patch.object(bridge.log, 'warning') as warning:
+                reader.feed_data(b''.join(self.frame(code='9876543210', iv=bytes([n]) * 16) for n in range(3)))
+                await asyncio.sleep(0)
+            self.assertEqual(len([m for m in self.warnings(warning) if 'device_code' in m]), 1)
+            reader.feed_eof()
+            await asyncio.sleep(0); await asyncio.sleep(0)
+            self.assertIsNone(self.b.stove_writer)
 
     async def test_coalesced_frames_do_not_complete_next_command(self):
         reader, writer = await self.connect()

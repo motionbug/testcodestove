@@ -4,7 +4,7 @@
 
 Read `docs/ARCHITECTURE.md`, `docs/MAINTENANCE.md`, `CHANGELOG.md`, and
 `KNOWN_ISSUES.md` before changing behavior. Inspect Git status and preserve
-unrelated work. Current app version is 1.0.3; hardware reliability remains
+unrelated work. Current app version is 1.0.4; hardware reliability remains
 under investigation. These files provide continuity without earlier chat history.
 
 ## Project Structure

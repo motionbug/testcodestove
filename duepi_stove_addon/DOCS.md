@@ -25,10 +25,10 @@ startup and discovery have been regression-tested with Paho 1.6.1 and 2.1.0.
 
 - Home Assistant OS with an administrator account and Apps available. Home
   Assistant Container/Core cannot install this app through this procedure.
-- A Duepi/MyDPremote Wi-Fi module already connected to your LAN and its private
-  device code (the code used to register the stove in MyDPremote, not its IP).
-  If you do not have the code, recover it from your own device/app records before
-  proceeding; do not paste captures or credentials into support requests.
+- A Duepi/MyDPremote Wi-Fi module already connected to your LAN, working with
+  the MyDPremote app, and its private 10-character **device code**. Section 1a
+  below explains how to find it. You need your own stove's code; nobody else's
+  code works, and the add-on does not ship with one.
 - The stove module's current LAN IP and the Home Assistant host's LAN IP. They
   are different settings. Prefer DHCP reservations for both.
 - Router access to override `duepiwebserver.com` for the stove, or configure a
@@ -39,6 +39,74 @@ startup and discovery have been regression-tested with Paho 1.6.1 and 2.1.0.
 
 Only one stove is supported per broker with the current fixed MQTT identifiers.
 Stop any standalone Node controller and close MyDPremote during initial setup.
+
+## 1a. Find your device code
+
+Every stove encrypts its traffic with its own key. The add-on derives that key
+from your device code when it starts:
+
+```text
+AES key = MD5(device code) XOR 23FADC18A422678312C86AC29281AC01
+```
+
+The second value is a fixed mask that is identical for every Duepi stove. It is
+already built into the add-on, so you only supply the code. The code is the
+`<code>` in the `master:<code>#` login that the MyDPremote app sends. It is
+10 letters/digits long and is not the stove's IP, MAC address, or Wi-Fi password.
+
+**Option A: you already have it.** If you kept the code you entered when you
+added the stove to MyDPremote, use that and skip to section 2.
+
+**Option B: capture your app's login (recommended if unsure).** The app sends
+the code in plain text at the start of every connection to
+`duepiwebserver.com` on TCP port 3000, so a packet capture of **your own
+phone** shows it. Do this *before* the DNS change in section 5, while the app
+still works normally.
+
+1. Start a capture of your phone's traffic, using one of these:
+   - **iPhone + Mac:** connect the iPhone by USB and get its UDID (Finder → the
+     phone → click the text under its name until the UDID appears). Then run
+     `rvictl -s <UDID>` (included with Xcode/Command Line Tools), open
+     Wireshark, and capture on the new `rvi0` interface.
+   - **Android:** install PCAPdroid (Play Store or F-Droid; root is not needed),
+     select the MyDPremote app as the target, and start capturing to a PCAP file.
+   - **Router:** if your router can capture packets (e.g. OpenWrt `tcpdump`),
+     capture traffic from the phone's IP on TCP port 3000.
+2. Open MyDPremote and wait until it shows your stove's status. That connection
+   carries the login.
+3. Stop the capture and save it, for example as `app.pcapng`.
+4. Find the code:
+   - Terminal: `grep -a -o 'master:[A-Za-z0-9]*#' app.pcapng`
+   - Wireshark: apply the display filter `frame contains "master:"` and read
+     the packet bytes.
+
+   The output looks like `master:AB12CD34EF#`. Your code is the 10 characters
+   between `master:` and `#` (here `AB12CD34EF`). Do not include the `#`.
+5. Delete the capture file (and on a Mac run `rvictl -x <UDID>`). It contains
+   your code and must not be shared.
+
+If nothing matches, confirm the app actually reached your stove during the
+capture and that the capture covers TCP port 3000. If the add-on later connects
+but every poll times out, the code is most likely wrong. See Troubleshooting.
+
+## 1b. What is safe to share
+
+The add-on works for anyone with their own device code. Everything except your
+personal values can be published and shared freely:
+
+| Safe to share | Keep private |
+|---|---|
+| All add-on and controller source code | Your device code |
+| The fixed key mask `23FADC18A422678312C86AC29281AC01` (same on every stove) | The AES key derived from your code |
+| The synthetic test code `0123456789`, its derived key, and the test frames in `tests/` | Packet captures (`.pcap`, `.pcapng`) of your app or stove |
+| Protocol documentation and command list | The add-on's `options.json` and unedited logs |
+| | MQTT passwords; ideally also your stove's IP and MAC address |
+
+Your device code works like a password. Anyone who has it can log in to the
+vendor relay as your app does and control your stove remotely. If you ask for
+help, describe symptoms and share log lines, but never post the code, a
+capture, or your configuration. If you think your code has leaked, contact
+Duepi/your stove dealer. This project cannot change or revoke it.
 
 ## 2. Prepare MQTT
 
@@ -211,6 +279,7 @@ commands require the stove to reconnect. Control commands are not retried.
 | Entity missing but MQTT connected | Ensure Home Assistant uses the same broker and discovery prefix. Inspect retained discovery and MQTT integration logs, then restart the bridge to republish. |
 | Entity unavailable / no stove connection | Verify stove IP, DNS actually used by stove, host port 3000, VLAN rules, and that an old connection has been re-established. |
 | Source IP differs from `stove_ip` | Check router source NAT and DHCP leases; preserve the original source IP. |
+| Log warns `The configured device_code is most likely wrong`, or **every** poll times out from the first one | Replies encrypted with a different key fail their checksum and are ignored. Repeat section 1a, re-enter the 10 characters without `#`, and restart. Version 1.0.4 and later log this warning once per connection after three such replies. |
 | Connected but polling times out | Check device code, a single active controller, repeated reconnects, and actual device replies. Any undocumented handshake requirement still needs target-device investigation. |
 | Control state changes then reverts | Compare subsequent polled state and logs; the optimistic MQTT update does not confirm the stove accepted the command. |
 
@@ -307,3 +376,19 @@ refresh the local app store, and update/rebuild the app to **1.0.3**. Verify the
 display and readback for one P1–P5 change during stable running, then during a
 normal startup, and retain the app log if the setting still differs. Use the
 checked-out source for 1.0.3; earlier ZIP snapshots are superseded.
+
+### Wrong device code warning (1.0.4)
+
+A wrong device code used to show up only as repeated poll timeouts. If three
+replies on a connection fail the checksum before any valid reply arrives, the
+app now logs once per connection:
+
+```text
+Stove (...) sent encrypted frames that all fail the checksum (rejected_frames=3,
+no valid reply on this connection). The configured device_code is most likely wrong
+```
+
+The message never includes the code, the key, or frame contents. Occasional
+corrupt replies after valid ones do not trigger it. Fix the code using section 1a
+and restart. This version changes only diagnostics; protocol and timeouts are
+unchanged.

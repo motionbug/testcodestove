@@ -61,6 +61,10 @@ POWER_COMMANDS = {
 # A startup request belongs only to this connection and this heating cycle.
 POWER_REQUEST_LIFETIME = 15 * 60
 
+# Checksum failures tolerated before any valid reply on a connection is reported
+# as a probable wrong device_code (logged once per connection, never the code).
+WRONG_CODE_FRAME_THRESHOLD = 3
+
 
 # ---------------------------------------------------------------------------
 # 1. Duepi Cloud Protocol & AES-128-CBC Codec
@@ -366,6 +370,11 @@ class DuepiStoveBridge:
         self.stove_writer = writer
         self.mqtt.publish(self.availability_topic, "online", qos=1, retain=True)
         buffer = b""
+        # Frames that decode but fail the checksum before any valid reply mean the
+        # stove encrypts with a different key: almost always a wrong device_code.
+        rejected_frames = 0
+        accepted_reply = False
+        wrong_code_reported = False
         try:
             while self.stove_writer is writer:
                 chunk = await reader.read(256)
@@ -391,7 +400,19 @@ class DuepiStoveBridge:
                     try:
                         body6, valid = decrypt_frame(frame, self.key)
                         if not valid or not re.fullmatch(r"[0-9A-Fa-f]{6}", body6):
+                            rejected_frames += 1
+                            if (not accepted_reply and not wrong_code_reported
+                                    and rejected_frames >= WRONG_CODE_FRAME_THRESHOLD):
+                                wrong_code_reported = True
+                                log.warning(
+                                    "Stove %s sent encrypted frames that all fail the checksum "
+                                    "(rejected_frames=%d, no valid reply on this connection). "
+                                    "The configured device_code is most likely wrong; see "
+                                    "'Find your device code' in the documentation.",
+                                    peer, rejected_frames,
+                                )
                             continue
+                        accepted_reply = True
                         if self.pending_reply is not None and not self.pending_reply.done():
                             self.pending_reply.set_result((body6, valid))
                     except (ValueError, UnicodeError) as exc:
