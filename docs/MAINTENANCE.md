@@ -46,7 +46,7 @@ python3 -m venv .venv-paho1
 .venv-paho1/bin/python -m unittest discover -s tests -p 'test_*.py' -q
 ```
 
-Baseline at 1.0.4: 19 Node and 32 Python tests. Record current results rather
+Baseline at 1.0.5: 19 Node and 40 Python tests. Record current results rather
 than assuming those counts remain fixed. Simulated tests do not prove container
 builds, physical fan behavior, or general architecture/model support. Documentation
 changes need link/diff/privacy review; repeat runtime tests when code changes or

@@ -15,6 +15,7 @@ Local, cloud-free TCP relay and MQTT Discovery climate bridge for **Duepi Group*
   - Diagnostic JSON attributes for observed power, requested power, and command outcome
   - Coordinated polling and one guarded startup power resend (1.0.3; awaiting hardware validation)
   - Log warning when replies point to a wrong device code (1.0.4)
+  - Stale TCP session replacement, 150ms command pacing, 20s availability grace, reconnect command delivery, decoupled post-command poll, and persistent mismatch single resend (1.0.5; awaiting hardware validation)
 
 ## Required configuration
 
@@ -22,5 +23,5 @@ Set `device_code` and `stove_ip` before starting. Use the stove module’s curre
 if it changes, update `stove_ip` and restart the add-on. A DHCP reservation is recommended.
 Follow [DOCS.md](DOCS.md) for the full Home Assistant installation, MQTT setup,
 network cutover, verification, and rollback. Read its deployment-status section:
-one live installation works partially, but communication timeouts and reverting
-power selections remain unresolved. This is an experimental preview.
+one live installation works partially, and version 1.0.5's session/command
+reliability fixes await live hardware validation. This is an experimental preview.

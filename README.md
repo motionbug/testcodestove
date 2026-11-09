@@ -2,18 +2,22 @@
 
 Experimental local control for Duepi/MyDPremote pellet stoves using the existing
 Wi-Fi module. This repository contains the Home Assistant MQTT app and an
-alternative standalone Node.js TCP/HTTP controller. Current source: **1.0.4**.
+alternative standalone Node.js TCP/HTTP controller. Current source: **1.0.5**.
 
 ## Status
 
 Live temperature readings and Heat/Off have worked on one installation.
 Intermittent timeouts and reverting power selections remain under investigation.
 Version 1.0.3 coordinates polling and commands, separates requested power from
-readback, and permits one guarded startup power resend. Those changes have
-offline regression coverage and still need physical-stove validation. Version
-1.0.4 logs a clear warning when replies indicate a wrong device code.
-See [known issues](KNOWN_ISSUES.md) before use. This is an experimental community
-project, unaffiliated with Duepi or Home Assistant.
+readback, and permits one guarded startup power resend. Version 1.0.4 logs a
+clear warning when replies indicate a wrong device code. Version 1.0.5 replaces
+stale TCP sessions when `stove_ip` reconnects, paces commands by `150ms`, holds
+availability and user commands across brief TCP reconnects within a 20-second
+grace window, decouples post-command polling from command acknowledgement, and
+adds one guarded resend on persistent readback mismatch (`0x02`/`0x04`); these
+changes have offline regression coverage and still need physical-stove
+validation. See [known issues](KNOWN_ISSUES.md) before use. This is an
+experimental community project, unaffiliated with Duepi or Home Assistant.
 
 ## Screenshots
 
@@ -86,7 +90,7 @@ python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-The export passes 19 Node tests and 32 Python tests; Python tests have also been
+The export passes 19 Node tests and 40 Python tests; Python tests have also been
 run with Paho MQTT 1.6.1 and 2.1.0. These do not replace Home Assistant packaging
 checks or live appliance testing.
 
@@ -100,7 +104,7 @@ verification rules. Florian's complete MIT notice is preserved in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and in the add-on folder.
 
 This project's code is available under the [MIT license](LICENSE).
-Use the source tree for 1.0.4; GitHub's **Code → Download ZIP** provides a source archive.
+Use the source tree for 1.0.5; GitHub's **Code → Download ZIP** provides a source archive.
 
 ## Privacy and contributions
 
