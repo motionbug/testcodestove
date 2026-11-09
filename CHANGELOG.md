@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.5 — 2026-11-09
+
+- Replace stale TCP sessions immediately when a new connection arrives from the
+  configured `stove_ip` (`SO_KEEPALIVE` and `TCP_NODELAY` enabled) and wake the
+  poll loop on reconnect, in both the Home Assistant bridge and `dpremote/stove.js`.
+- Hold MQTT availability as `online` across brief TCP reconnects within a
+  20-second grace window (`availability_grace`, default `20.0`s) before expiring
+  to `offline`.
+- Pace sequential stove exchanges by `150ms` (`command_delay`, default `0.15`s)
+  to avoid back-to-back serial bursts during 5-command status polls.
+- Hold and deliver user MQTT commands (`mode`, `fan_mode`, `target_temperature`)
+  across poll timeouts and brief TCP reconnects within the grace window, with a
+  single retry if a socket is replaced mid-command and generation-based
+  coalescing of superseded intents.
+- Decouple the post-command verification poll from command acknowledgement so a
+  transient readback timeout never erases `pending_power` or `acknowledged`
+  status, and allow one guarded resend on persistent readback mismatch
+  (`mismatch_polls >= 2`) in phases `0x02` and `0x04`.
+- Demote unsolicited 10-byte idle frames (`\x1b00000000&` when no command reply
+  is pending) from warning to debug in Python and ignore them quietly in Node.
+- Add regressions: baseline now 19 Node tests and 40 Python tests, exercised
+  with Paho 1.6.1 and 2.1.0. Live hardware validation of 1.0.5 remains pending.
+
 ## 1.0.4 — 2026-11-02
 
 - Log one warning per connection when three replies fail the checksum before any

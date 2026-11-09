@@ -289,10 +289,16 @@ function startServer({ tcpPort = 3000, httpPort = 8080, pcapPath = DEFAULT_PCAP,
     const peer = `${sock.remoteAddress}:${sock.remotePort}`;
     sock.on('error', err => closeSession(sock, err));
     const version = net.isIP(sock.remoteAddress || '');
-    if (!version || !allowedPeer.check(sock.remoteAddress, version === 4 ? 'ipv4' : 'ipv6') || stoveSocket) {
+    if (!version || !allowedPeer.check(sock.remoteAddress, version === 4 ? 'ipv4' : 'ipv6')) {
       sock.destroy();
       return;
     }
+    if (stoveSocket && stoveSocket !== sock) {
+      console.log(`[TCP] Replacing stale stove session with reconnect from ${peer}`);
+      closeSession(stoveSocket, new Error('Stove reconnected on new socket'));
+    }
+    sock.setKeepAlive(true);
+    sock.setNoDelay(true);
     stoveSocket = sock;
     console.log(`[TCP] Stove connected from ${peer}`);
     let buffer = '';
@@ -340,6 +346,7 @@ function startServer({ tcpPort = 3000, httpPort = 8080, pcapPath = DEFAULT_PCAP,
             pending.resolve(dec);
           }
         } catch (error) {
+          if (frame.length === 10 && !pendingReply) continue;
           console.error(`[TCP] Invalid frame from ${peer}: ${error.message}`);
         }
       }

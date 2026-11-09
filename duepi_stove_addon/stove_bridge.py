@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sys
 from pathlib import Path
 from time import monotonic
@@ -140,6 +141,8 @@ class DuepiStoveBridge:
         self.key: bytes = derive_key(self.device_code)
         self.listen_port: int = int(config.get("listen_port", 3000))
         self.poll_interval: int = int(config.get("poll_interval", 15))
+        self.command_delay: float = float(config.get("command_delay", 0.15))
+        self.availability_grace: float = float(config.get("availability_grace", 20.0))
 
         # MQTT topics
         prefix = config.get("discovery_prefix", "homeassistant").rstrip("/")
@@ -160,10 +163,16 @@ class DuepiStoveBridge:
         # Runtime state
         self.loop: asyncio.AbstractEventLoop | None = None
         self.stove_writer: asyncio.StreamWriter | None = None
+        self.connected_event = asyncio.Event()
+        self.poll_wakeup_event = asyncio.Event()
         self.cmd_lock = asyncio.Lock()
         self.operation_lock = asyncio.Lock()
         self.poll_generation = 0
         self.intent_generation = 0
+        self.temp_generation: int = 0
+        self.last_command_finished_at: float = 0.0
+        self.in_grace_period: bool = False
+        self._offline_timer_handle: asyncio.TimerHandle | None = None
         self.requested_power: str | None = None
         self.power_command_status = "idle"
         self.pending_power: dict[str, Any] | None = None
@@ -232,8 +241,8 @@ class DuepiStoveBridge:
             (self.cmd_temp_topic, 1),
             (self.cmd_fan_topic, 1),
         ])
-        # Mark online if stove socket is already connected
-        status = "online" if self.stove_writer is not None else "offline"
+        # Mark online if stove socket is already connected or in reconnect grace period
+        status = "online" if (self.stove_writer is not None or self.in_grace_period) else "offline"
         client.publish(self.availability_topic, status, qos=1, retain=True)
 
     def _on_mqtt_message(self, client: mqtt.Client, userdata: Any, msg: mqtt.MQTTMessage) -> None:
@@ -241,6 +250,19 @@ class DuepiStoveBridge:
         log.info("MQTT command received on %s: %s", msg.topic, payload)
         if self.loop is not None:
             asyncio.run_coroutine_threadsafe(self.handle_mqtt_command(msg.topic, payload), self.loop)
+
+    async def _wait_for_active_writer(self, is_power: bool, generation: int) -> asyncio.StreamWriter | None:
+        if (is_power and generation != self.intent_generation) or (not is_power and generation != self.temp_generation):
+            return None
+        if self.stove_writer is None or self.stove_writer.is_closing():
+            if not self.in_grace_period:
+                raise RuntimeError("Stove TCP socket is not connected")
+            await asyncio.wait_for(self.connected_event.wait(), timeout=max(0.001, self.availability_grace))
+            if (is_power and generation != self.intent_generation) or (not is_power and generation != self.temp_generation):
+                return None
+            if self.stove_writer is None or self.stove_writer.is_closing():
+                raise RuntimeError("Stove TCP socket is not connected")
+        return self.stove_writer
 
     async def handle_mqtt_command(self, topic: str, payload: str) -> None:
         """Translate Home Assistant MQTT climate commands into encrypted Duepi frames."""
@@ -250,8 +272,7 @@ class DuepiStoveBridge:
             power = self.last_power_level if payload == "heat" else None
             if payload == "heat":
                 pending = self.pending_power
-                if (pending is not None and pending["writer"] is writer
-                        and monotonic() < pending["deadline"]):
+                if pending is not None and monotonic() < pending["deadline"]:
                     power = pending["power"]
                 elif self.power_command_status == "queued" and self.requested_power:
                     power = self.requested_power
@@ -268,7 +289,7 @@ class DuepiStoveBridge:
         else:
             return
 
-        if writer is None or writer.is_closing():
+        if (writer is None or writer.is_closing()) and not self.in_grace_period:
             log.warning("Ignoring command while stove is disconnected: %s", topic)
             return
 
@@ -279,25 +300,54 @@ class DuepiStoveBridge:
             self.pending_power = None
             self.requested_power = power
             self.power_command_status = "queued" if power else "cancelled"
-        generation = self.intent_generation
+            generation = self.intent_generation
+        else:
+            self.temp_generation += 1
+            generation = self.temp_generation
         try:
             async with self.operation_lock:
-                if writer is None or writer is not self.stove_writer:
+                writer = await self._wait_for_active_writer(is_power, generation)
+                if writer is None:
                     return
-                if is_power and generation != self.intent_generation:
-                    return
-                await self.send_command(cmd6)
-                if power and generation == self.intent_generation:
-                    self.power_command_status = "acknowledged"
-                    self.pending_power = {
-                        "power": power, "writer": writer, "generation": generation,
-                        "deadline": monotonic() + POWER_REQUEST_LIFETIME,
-                        "startup_seen": self.last_phase in (0x01, 0x02),
-                        "awaiting_startup": topic == self.cmd_mode_topic and payload == "heat",
-                        "resent": False,
-                    }
+                try:
+                    await self.send_command(cmd6)
+                except Exception as exc:
+                    has_replacement_writer = (
+                        self.stove_writer is not None
+                        and self.stove_writer is not writer
+                        and not self.stove_writer.is_closing()
+                    )
+                    if not self.in_grace_period and not has_replacement_writer:
+                        raise
+                    if (is_power and generation != self.intent_generation) or (
+                        not is_power and generation != self.temp_generation
+                    ):
+                        return
+                    writer = await self._wait_for_active_writer(is_power, generation)
+                    if writer is None:
+                        return
+                    await self.send_command(cmd6)
+                if is_power and generation == self.intent_generation:
+                    if power:
+                        self.power_command_status = "acknowledged"
+                        self.pending_power = {
+                            "power": power,
+                            "generation": generation,
+                            "deadline": monotonic() + POWER_REQUEST_LIFETIME,
+                            "startup_seen": self.last_phase in (0x01, 0x02),
+                            "awaiting_startup": topic == self.cmd_mode_topic and payload == "heat",
+                            "mismatch_polls": 0,
+                            "resent": False,
+                        }
+                    else:
+                        self.pending_power = None
+                        self.power_command_status = "cancelled"
                 # Publish physical readback, not the setting we merely requested.
-                await self._poll_locked(writer)
+                if self.stove_writer is not None and not self.stove_writer.is_closing():
+                    try:
+                        await self._poll_locked(self.stove_writer)
+                    except Exception as poll_exc:
+                        log.warning("Post-command poll interrupted (%s -> %s): %s", topic, payload, poll_exc)
         except Exception as exc:
             if is_power and generation == self.intent_generation:
                 self.pending_power = None
@@ -306,18 +356,48 @@ class DuepiStoveBridge:
 
     # --- Stove TCP Server & Frame Exchange ---
 
-    def close_session(self, writer: asyncio.StreamWriter, error: Exception) -> None:
-        """Invalidate the current session before releasing any waiting command."""
-        if self.stove_writer is writer:
-            self.stove_writer = None
+    def _expire_availability(self) -> None:
+        if self._offline_timer_handle is not None:
+            self._offline_timer_handle.cancel()
+            self._offline_timer_handle = None
+        self.in_grace_period = False
+        if self.stove_writer is None:
             self.intent_generation += 1
+            self.temp_generation += 1
+            self.connected_event.set()
+            self.connected_event.clear()
             if self.pending_power is not None or self.power_command_status == "queued":
                 self.power_command_status = "unknown"
             self.pending_power = None
             self.last_phase = None
             self.mqtt.publish(self.availability_topic, "offline", qos=1, retain=True)
+
+    def close_session(
+        self,
+        writer: asyncio.StreamWriter,
+        error: Exception,
+        *,
+        replaced: bool = False,
+        immediate_offline: bool = False,
+    ) -> None:
+        """Invalidate the current session before releasing any waiting command."""
+        if self.stove_writer is writer:
+            self.stove_writer = None
+            self.connected_event.clear()
             if self.pending_reply is not None and not self.pending_reply.done():
                 self.pending_reply.set_exception(error)
+            if replaced:
+                pass
+            elif immediate_offline or self.availability_grace <= 0 or self.loop is None:
+                self._expire_availability()
+            else:
+                if self._offline_timer_handle is not None:
+                    self._offline_timer_handle.cancel()
+                self.in_grace_period = True
+                self._offline_timer_handle = self.loop.call_later(
+                    self.availability_grace,
+                    self._expire_availability,
+                )
         writer.close()
 
     async def send_command(self, cmd6: str, timeout: float = 4.0) -> str:
@@ -326,6 +406,12 @@ class DuepiStoveBridge:
         async with self.cmd_lock:
             if writer is None or writer is not self.stove_writer or writer.is_closing():
                 raise RuntimeError("Stove TCP socket is not connected")
+            if self.command_delay > 0 and self.last_command_finished_at > 0:
+                remaining = self.command_delay - (monotonic() - self.last_command_finished_at)
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                    if writer is not self.stove_writer or writer.is_closing():
+                        raise RuntimeError("Stove TCP socket is not connected")
 
             assert self.loop is not None
             pending = self.loop.create_future()
@@ -341,6 +427,7 @@ class DuepiStoveBridge:
                     raise ValueError("Invalid stove reply")
                 if cmd6.startswith("RF0") or cmd6 == CMD_GET_POWER:
                     log.info("Stove reply: command=%s body=%s checksum=valid", cmd6, body6)
+                self.last_command_finished_at = monotonic()
                 return body6
             except BaseException:
                 # No request IDs exist on this wire protocol. Reconnect after any
@@ -362,12 +449,40 @@ class DuepiStoveBridge:
         except (ValueError, TypeError, IndexError):
             writer.close()
             return
-        if address != self.stove_ip or self.stove_writer is not None:
+        if address != self.stove_ip:
             writer.close()
             return
 
+        if self.stove_writer is not None and self.stove_writer is not writer:
+            log.info("Replacing stale stove TCP session with new connection from %s", peer)
+            self.close_session(
+                self.stove_writer,
+                ConnectionError("Stove reconnected on new socket"),
+                replaced=True,
+            )
+
+        sock = writer.get_extra_info("socket")
+        if sock is not None and hasattr(sock, "setsockopt"):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            except OSError:
+                pass
+            if hasattr(socket, "TCP_NODELAY"):
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except OSError:
+                    pass
+
+        if self._offline_timer_handle is not None:
+            self._offline_timer_handle.cancel()
+            self._offline_timer_handle = None
+        self.in_grace_period = False
+
         log.info("Stove TCP connection established from %s", peer)
         self.stove_writer = writer
+        self.last_command_finished_at = 0.0
+        self.connected_event.set()
+        self.poll_wakeup_event.set()
         self.mqtt.publish(self.availability_topic, "online", qos=1, retain=True)
         buffer = b""
         # Frames that decode but fail the checksum before any valid reply mean the
@@ -416,7 +531,8 @@ class DuepiStoveBridge:
                         if self.pending_reply is not None and not self.pending_reply.done():
                             self.pending_reply.set_result((body6, valid))
                     except (ValueError, UnicodeError) as exc:
-                        log.warning(
+                        log_fn = log.debug if (len(frame) == 10 and self.pending_command is None) else log.warning
+                        log_fn(
                             "Invalid frame from %s: %s (frame_bytes=%d base64_bytes=%d pending_command=%s)",
                             peer, exc, len(frame), len(frame[1:-1]), self.pending_command or "none",
                         )
@@ -468,8 +584,7 @@ class DuepiStoveBridge:
         if request is not None:
             waiting_for_ignition = (phase == 0 and request["awaiting_startup"]
                                    and not request["startup_seen"])
-            if (request["writer"] is not writer
-                    or request["generation"] != self.intent_generation
+            if (request["generation"] != self.intent_generation
                     or error_code
                     or (phase not in (0x01, 0x02, 0x04, 0x40) and not waiting_for_ignition)):
                 self.pending_power = None
@@ -478,15 +593,29 @@ class DuepiStoveBridge:
                 self.pending_power = None
                 self.power_command_status = "expired"
             else:
-                request["startup_seen"] |= phase in (0x01, 0x02)
-                self.power_command_status = (
-                    "confirmed" if fan_mode == request["power"] else "mismatched"
-                )
-                resend = (fan_mode is not None and fan_mode != request["power"]
-                          and request["startup_seen"] and not request["resent"]
-                          and previous_phase in (0x01, 0x02) and phase == 0x04)
-                if phase not in (0x01, 0x02) and not resend and not waiting_for_ignition:
-                    self.pending_power = None
+                request["startup_seen"] |= phase in (0x01, 0x02) or previous_phase in (0x01, 0x02)
+                if fan_mode == request["power"]:
+                    self.power_command_status = "confirmed"
+                    request["mismatch_polls"] = 0
+                    if phase not in (0x01, 0x02) and not waiting_for_ignition:
+                        self.pending_power = None
+                else:
+                    self.power_command_status = "mismatched"
+                    if fan_mode is not None:
+                        request["mismatch_polls"] = request.get("mismatch_polls", 0) + 1
+                    startup_transition = (
+                        request["startup_seen"] and previous_phase in (0x01, 0x02) and phase == 0x04
+                    )
+                    persistent_mismatch = (
+                        phase in (0x02, 0x04) and request.get("mismatch_polls", 0) >= 2
+                    )
+                    resend = (
+                        fan_mode is not None
+                        and not request["resent"]
+                        and (startup_transition or persistent_mismatch)
+                    )
+                    if not resend and (request["resent"] or (phase not in (0x01, 0x02, 0x04) and not waiting_for_ignition)):
+                        self.pending_power = None
 
         self._publish_snapshot(phase, ambient_c, setpoint_c, power_lvl, error_code, fan_mode)
         if resend:
@@ -498,6 +627,7 @@ class DuepiStoveBridge:
                     or monotonic() >= request["deadline"]):
                 return
             request["resent"] = True
+            request["mismatch_polls"] = 0
             try:
                 await self.send_command(POWER_COMMANDS[request["power"]])
             except BaseException:
@@ -559,11 +689,17 @@ class DuepiStoveBridge:
 
     async def poll_loop(self) -> None:
         while True:
+            self.poll_wakeup_event.clear()
             try:
                 await self.poll_once()
             except Exception as exc:
                 log.warning("Polling cycle error: %s: %s", type(exc).__name__, exc)
-            await asyncio.sleep(self.poll_interval)
+            try:
+                await asyncio.wait_for(self.poll_wakeup_event.wait(), timeout=self.poll_interval)
+                if self.command_delay > 0:
+                    await asyncio.sleep(self.command_delay)
+            except asyncio.TimeoutError:
+                pass
 
     async def run(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -583,6 +719,10 @@ class DuepiStoveBridge:
                 await server.serve_forever()
         finally:
             poll_task.cancel()
+            if self._offline_timer_handle is not None:
+                self._offline_timer_handle.cancel()
+                self._offline_timer_handle = None
+            self.in_grace_period = False
             self.mqtt.publish(self.availability_topic, "offline", qos=1, retain=True)
             self.mqtt.loop_stop()
             self.mqtt.disconnect()
@@ -597,6 +737,8 @@ def load_config() -> dict[str, Any]:
         "stove_ip": os.environ.get("DUEPI_STOVE_IP", ""),
         "listen_port": int(os.environ.get("LISTEN_PORT", "3000")),
         "poll_interval": int(os.environ.get("POLL_INTERVAL", "15")),
+        "command_delay": float(os.environ.get("COMMAND_DELAY", "0.15")),
+        "availability_grace": float(os.environ.get("AVAILABILITY_GRACE", "20.0")),
         "mqtt_host": os.environ.get("MQTT_HOST", "localhost"),
         "mqtt_port": int(os.environ.get("MQTT_PORT", "1883")),
         "mqtt_user": os.environ.get("MQTT_USER", ""),

@@ -41,7 +41,7 @@ class Writer:
 
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.b = bridge.DuepiStoveBridge({'device_code': CODE, 'stove_ip': '192.0.2.10'})
+        self.b = bridge.DuepiStoveBridge({'device_code': CODE, 'stove_ip': '192.0.2.10', 'command_delay': 0.0})
         # Record MQTT output at the external broker boundary; keep bridge logic real.
         self.b.mqtt.publish = Mock()
         self.b.loop = asyncio.get_running_loop()
@@ -55,6 +55,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             if not task.done():
                 task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
+        if getattr(self.b, '_offline_timer_handle', None) is not None:
+            self.b._offline_timer_handle.cancel()
 
     async def connect(self, ip='192.0.2.10'):
         reader, writer = asyncio.StreamReader(), Writer(ip)
@@ -115,14 +117,52 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ConnectionError):
             await task
 
-    async def test_rejects_unmatched_and_duplicate_connections(self):
-        reader, current = await self.connect('::ffff:192.0.2.10')
+    async def test_rejects_unmatched_and_replaces_stale_stove_connection(self):
+        reader, old_writer = await self.connect('::ffff:192.0.2.10')
         _, intruder = await self.connect('192.0.2.11')
-        _, duplicate = await self.connect()
         self.assertTrue(intruder.closed)
-        self.assertTrue(duplicate.closed)
-        self.assertIs(self.b.stove_writer, current)
-        self.assertFalse(current.closed)
+        self.assertIs(self.b.stove_writer, old_writer)
+        new_reader, new_writer = await self.connect('192.0.2.10')
+        self.assertTrue(old_writer.closed)
+        self.assertIs(self.b.stove_writer, new_writer)
+        self.assertFalse(new_writer.closed)
+
+    async def test_availability_stays_online_during_grace_and_expires_to_offline(self):
+        reader, writer = await self.connect()
+        self.b.mqtt.publish.reset_mock()
+        self.b.close_session(writer, ConnectionError('transient drop'))
+        self.assertTrue(self.b.in_grace_period)
+        offline_calls = [c for c in self.b.mqtt.publish.call_args_list
+                         if c.args[:2] == (self.b.availability_topic, 'offline')]
+        self.assertEqual(offline_calls, [])
+        self.b.mqtt.subscribe = Mock()
+        if hasattr(bridge.mqtt, 'CallbackAPIVersion'):
+            self.b.mqtt.on_connect(self.b.mqtt, None, {}, 0, None)
+        else:
+            self.b.mqtt.on_connect(self.b.mqtt, None, {}, 0)
+        self.b.mqtt.publish.assert_any_call(self.b.availability_topic, 'online', qos=1, retain=True)
+        queued_cmd = asyncio.create_task(self.b.handle_mqtt_command(self.b.cmd_fan_topic, 'P3'))
+        self.tasks.append(queued_cmd)
+        await asyncio.sleep(0); await asyncio.sleep(0)
+        self.assertFalse(queued_cmd.done())
+        self.b._expire_availability()
+        await asyncio.wait_for(queued_cmd, timeout=0.1)
+        self.assertFalse(self.b.in_grace_period)
+        self.b.mqtt.publish.assert_any_call(self.b.availability_topic, 'offline', qos=1, retain=True)
+
+    async def test_ten_byte_idle_heartbeat_does_not_log_warning_unless_command_pending(self):
+        reader, _ = await self.connect()
+        with patch.object(bridge.log, 'warning') as warning:
+            reader.feed_data(b'\x1b00000020&')
+            await asyncio.sleep(0)
+            self.assertEqual(warning.call_count, 0)
+        task = await self.command()
+        with patch.object(bridge.log, 'warning') as warning:
+            reader.feed_data(b'\x1b00000020&')
+            await asyncio.sleep(0)
+            self.assertEqual(warning.call_count, 1)
+        reader.feed_data(self.frame())
+        self.assertEqual(await task, '000000')
 
     async def test_oversized_incomplete_frame_disconnects(self):
         reader, writer = await self.connect()
@@ -381,12 +421,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_pending_request_does_not_cross_session_or_failed_write(self):
         state, reader, writer = await self.stove()
         await self.b.handle_mqtt_command(self.b.cmd_fan_topic, 'P5')
-        self.b.close_session(writer, ConnectionError('test disconnect'))
+        self.b.close_session(writer, ConnectionError('test disconnect'), immediate_offline=True)
         reader.feed_eof()
         await asyncio.sleep(0)
         new, _, _ = await self.stove(phase=4)
         await self.b.poll_once()
         self.assertNotIn('RF0050', new['commands'])
+        self.b.availability_grace = 0.0
         new['drop'] = 'RF0030'
         await self.b.handle_mqtt_command(self.b.cmd_fan_topic, 'P3')
         await asyncio.sleep(0)
@@ -454,6 +495,100 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.b.handle_mqtt_command(self.b.cmd_mode_topic, 'heat')
         self.assertNotIn('RF0050', state['commands'])
         self.assertIn('RF0010', state['commands'])
+
+    async def test_command_queued_during_failing_poll_executes_after_reconnect(self):
+        state, reader, _ = await self.stove(phase=2, power=4)
+        state['hold'] = 'RD1000'
+        poll = asyncio.create_task(self.b.poll_once())
+        self.tasks.append(poll)
+        await state['entered'].wait()
+        cmd = asyncio.create_task(self.b.handle_mqtt_command(self.b.cmd_fan_topic, 'P3'))
+        self.tasks.append(cmd)
+        await asyncio.sleep(0)
+        reader.feed_eof()
+        state['release'].set()
+        with self.assertRaises(ConnectionError):
+            await poll
+        new_state, _, _ = await self.stove(phase=2, power=3)
+        await cmd
+        self.assertIn('RF0030', new_state['commands'])
+        self.assertEqual(self.attrs()['power_command_status'], 'confirmed')
+
+    async def test_superseded_temperature_commands_coalesce_during_reconnect(self):
+        state, reader, writer = await self.stove(phase=2, power=4)
+        await self.b.handle_mqtt_command(self.b.cmd_fan_topic, 'P5')
+        self.b.close_session(writer, ConnectionError('drop'))
+        reader.feed_eof()
+        t1 = asyncio.create_task(self.b.handle_mqtt_command(self.b.cmd_temp_topic, '35.0'))
+        t2 = asyncio.create_task(self.b.handle_mqtt_command(self.b.cmd_temp_topic, '24.0'))
+        off = asyncio.create_task(self.b.handle_mqtt_command(self.b.cmd_mode_topic, 'off'))
+        self.tasks.extend([t1, t2, off])
+        await asyncio.sleep(0)
+        new_state, _, _ = await self.stove(phase=2, power=4)
+        await asyncio.gather(t1, t2, off)
+        self.assertNotIn('RF2230', new_state['commands'])
+        self.assertIn('RF2180', new_state['commands'])
+        self.assertIn('RF0000', new_state['commands'])
+        self.assertIsNone(self.b.pending_power)
+
+    async def test_post_command_poll_timeout_preserves_acknowledged_power_and_pending_request(self):
+        state, _, _ = await self.stove(phase=2, power=4)
+        state['drop'] = 'RD9000'
+        await self.b.handle_mqtt_command(self.b.cmd_fan_topic, 'P3')
+        self.assertIn('RF0030', state['commands'])
+        self.assertEqual(self.b.power_command_status, 'acknowledged')
+        self.assertIsNotNone(self.b.pending_power)
+        new_state, _, _ = await self.stove(phase=4, power=4)
+        self.b.last_phase = 2
+        await self.b.poll_once()
+        self.assertIn('RF0030', new_state['commands'])
+
+    async def test_persistent_mismatch_in_phase_02_resends_once_then_stops(self):
+        state, _, _ = await self.stove(phase=2, power=4)
+        await self.b.handle_mqtt_command(self.b.cmd_fan_topic, 'P3')
+        self.assertEqual(state['commands'].count('RF0030'), 1)
+        await self.b.poll_once()
+        self.assertEqual(state['commands'].count('RF0030'), 2)
+        await self.b.poll_once()
+        self.assertEqual(state['commands'].count('RF0030'), 2)
+        self.assertFalse(self.attrs()['power_request_pending'])
+
+    async def test_inflight_command_retries_when_session_is_replaced_mid_command(self):
+        state, reader, _ = await self.stove(phase=2, power=4)
+        state['hold'] = 'RF0030'
+        cmd = asyncio.create_task(self.b.handle_mqtt_command(self.b.cmd_fan_topic, 'P3'))
+        self.tasks.append(cmd)
+        await state['entered'].wait()
+        new_state, _, _ = await self.stove(phase=2, power=3)
+        reader.feed_eof()
+        state['release'].set()
+        await cmd
+        self.assertIn('RF0030', new_state['commands'])
+        self.assertEqual(self.b.power_command_status, 'confirmed')
+
+    async def test_command_delay_paces_consecutive_commands_and_poll_wakeup_wakes_poll_loop(self):
+        await self.stove(phase=2, power=3)
+        self.b.command_delay = 0.04
+        t0 = asyncio.get_running_loop().time()
+        await self.b.send_command('RD9000')
+        await self.b.send_command('RD1000')
+        elapsed = asyncio.get_running_loop().time() - t0
+        self.assertGreaterEqual(elapsed, 0.03)
+
+        self.b.command_delay = 0.0
+        self.b.poll_interval = 60
+        loop_task = asyncio.create_task(self.b.poll_loop())
+        self.tasks.append(loop_task)
+        while self.b.poll_generation < 1:
+            await asyncio.sleep(0.005)
+        t1 = asyncio.get_running_loop().time()
+        self.b.poll_wakeup_event.set()
+        while self.b.poll_generation < 2:
+            await asyncio.sleep(0.005)
+        wake_elapsed = asyncio.get_running_loop().time() - t1
+        self.assertLess(wake_elapsed, 1.0)
+        loop_task.cancel()
+
 
 
 class MQTTStartupTests(unittest.IsolatedAsyncioTestCase):

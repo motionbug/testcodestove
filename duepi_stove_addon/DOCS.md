@@ -11,9 +11,14 @@ regression tests and reference capture decoding pass. On one Home Assistant
 installation, version 1.0.1 started, connected to MQTT, and published discovery;
 1.0.2 received live telemetry, acknowledged a power command, and read power P4.
 However, intermittent reply timeouts/reconnects and reverting power selections
-remain unresolved. Ten-byte unsolicited frames are rejected by the encrypted
-frame parser; their meaning has not been established. Finish the startup checks
-below before redirecting the stove, and do not rely on it for unattended heating.
+remain under hardware validation. Version **1.0.5** replaces stale TCP sessions
+when the stove reconnects from `stove_ip`, paces serial exchanges by `150ms`,
+holds availability and user commands across brief TCP reconnects within a
+20-second grace window, decouples post-command polling from command execution,
+resends a persistent power readback mismatch once in phases `0x02`/`0x04`, and
+quietly ignores 10-byte unsolicited idle frames when no reply is pending. Finish
+the startup checks below before redirecting the stove, and do not rely on it for
+unattended heating.
 
 One packaging check remains: `Dockerfile` defaults to an **aarch64** base even
 though the manifest advertises other architectures. An amd64/armv7 host needs
@@ -392,3 +397,43 @@ The message never includes the code, the key, or frame contents. Occasional
 corrupt replies after valid ones do not trigger it. Fix the code using section 1a
 and restart. This version changes only diagnostics; protocol and timeouts are
 unchanged.
+
+### Session replacement, command pacing, and reconnect reliability (1.0.5)
+
+- **Stale TCP session replacement on reconnect:** When a new TCP connection
+  arrives from the configured `stove_ip` (for example `192.0.2.10`), both the
+  Home Assistant add-on and `dpremote/stove.js` immediately close and replace
+  the previous socket (`TCP_NODELAY` and `SO_KEEPALIVE` enabled) instead of
+  rejecting the reconnect while the stale socket waits for a poll timeout.
+  Connections from any other IP are still rejected immediately.
+- **20-second MQTT availability grace window:** On disconnect or poll timeout,
+  the add-on holds `duepi_stove/availability` as `online` for up to 20 seconds
+  (`availability_grace: 20.0`) so brief ESP8266 TCP reconnects do not flap the
+  Home Assistant climate entity to `unavailable`. If no reconnect arrives before
+  the timer expires, availability transitions to `offline`.
+- **Inter-command pacing (`150ms`):** The bridge enforces a `150ms` minimum
+  delay (`command_delay: 0.15`) after each completed stove frame exchange before
+  sending the next command, preventing back-to-back poll and control frames from
+  overrunning the ESP8266/serial link.
+- **Command holding and delivery across poll timeouts and brief reconnects:**
+  User MQTT commands (`mode`, `target_temperature`, `fan_mode`) wait up to the
+  20-second availability grace window for an active stove connection if one is
+  reconnecting, and perform at most one reconnect delivery retry per user intent
+  when the initial write fails or times out before an application reply is
+  received. Newer user commands supersede older queued intents of the same type.
+- **Decoupled post-command poll:** `power_command_status = "acknowledged"` and
+  `pending_power` are recorded immediately after the stove replies to a power
+  command, and the follow-up verification poll runs in an isolated error boundary
+  (with `poll_wakeup_event` waking the poll loop on reconnect) so a post-command
+  poll timeout never erases acknowledged power state or pending recovery.
+- **Persistent mismatch single resend (`0x02`/`0x04`):** Pending power requests
+  survive brief TCP reconnects within the availability grace window and their
+  15-minute lifetime. In addition to the startup (`01`/`02` → `04`) transition
+  check, if readback in phase `0x02` (Flame Present) or `0x04` (Running) reports
+  `mismatched` across two consecutive polls (`mismatch_polls >= 2`) and the
+  request has not yet been resent, the bridge resends the requested power level
+  once.
+- **Quiet handling of 10-byte ESP8266 idle frames:** Unsolicited 10-byte frames
+  (`\x1b00000000&`) received while no command reply is pending are ignored
+  quietly (logged at debug level in Python, suppressed in `dpremote/stove.js`)
+  without incrementing wrong-code counters or logging invalid-frame warnings.
