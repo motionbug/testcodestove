@@ -1,7 +1,7 @@
 const { test: nodeTest } = require('node:test');
 const test = (name, fn) => nodeTest(name, { timeout: 500 }, fn);
 const assert = require('node:assert/strict');
-const { EventEmitter } = require('node:events');
+const { EventEmitter, once } = require('node:events');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
@@ -16,18 +16,22 @@ function setup(ip = '192.0.2.10') {
   let tcp, http;
   const timers = new Set();
   const warnings = [];
+  const errors = [];
   const sandbox = {
     require: name => name === 'net' ? { ...require('net'), createServer: cb => { tcp = cb; return { listen() {} }; } }
       : name === 'http' ? { createServer: cb => { http = cb; return { listen() {} }; } } : require(name),
     module: { exports: {} }, __dirname: path.resolve(__dirname, '../dpremote'),
     process: { env: { DUEPI_CODE: CODE, DUEPI_STOVE_IP: ip } }, Buffer, URL,
-    console: { log() {}, error() {}, warn: msg => warnings.push(String(msg)) },
+    console: { log() {}, error: msg => errors.push(String(msg)), warn: msg => warnings.push(String(msg)) },
     setTimeout: fn => { timers.add(fn); return fn; }, clearTimeout: fn => timers.delete(fn),
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../dpremote/stove.js'), 'utf8') + '\nstartServer();', sandbox);
   function connect(address = '192.0.2.10') {
     const socket = new EventEmitter();
-    Object.assign(socket, { remoteAddress: address, remotePort: 1234, destroyed: false, writes: [] });
+    Object.assign(socket, {
+      remoteAddress: address, remotePort: 1234, destroyed: false, writes: [],
+      setKeepAlive() {}, setNoDelay() {},
+    });
     socket.write = wire => socket.writes.push(codec.decryptFrame(wire, key).body);
     socket.destroy = () => { if (!socket.destroyed) { socket.destroyed = true; socket.emit('close'); } };
     tcp(socket);
@@ -41,7 +45,7 @@ function setup(ip = '192.0.2.10') {
     http({ method, url }, res);
     return done;
   }
-  return { connect, request, warnings, expire: () => { for (const fn of [...timers]) fn(); } };
+  return { connect, request, warnings, errors, expire: () => { for (const fn of [...timers]) fn(); } };
 }
 function reply(body = '000000', checksum, frameKey = key, iv = Buffer.alloc(16)) {
   const payload = body + (checksum ?? codec.checksumHex(body));
@@ -130,12 +134,22 @@ test('oversized incomplete frames disconnect the client', () => {
   socket.emit('data', Buffer.from('\x1b' + 'A'.repeat(5000)));
   assert.equal(socket.destroyed, true);
 });
-test('unmatched peers and duplicate sessions cannot replace the stove', async () => {
+test('unmatched peers are rejected while reconnects from the stove IP replace the stale session', async () => {
   const app = setup(), stove = app.connect('::ffff:192.0.2.10');
-  const intruder = app.connect('192.0.2.11'), duplicate = app.connect();
-  assert.equal(intruder.destroyed, true); assert.equal(duplicate.destroyed, true);
+  const intruder = app.connect('192.0.2.11');
+  assert.equal(intruder.destroyed, true);
+  assert.equal(stove.destroyed, false);
+  const closed = once(stove, 'close');
+  const replacement = app.connect('192.0.2.10');
+  assert.equal(stove.destroyed, true);
+  assert.equal(replacement.destroyed, false);
+  await closed;
+  replacement.emit('data', Buffer.from('\x1b00000000&', 'latin1'));
+  assert.equal(replacement.destroyed, false);
+  assert.deepEqual(app.errors, []);
   const result = app.request('/api/power?level=1'); await tick();
-  stove.emit('data', reply()); assert.equal((await result).status, 200);
+  assert.deepEqual(replacement.writes, ['RF0010']);
+  replacement.emit('data', reply()); assert.equal((await result).status, 200);
 });
 test('rejects split app login without logging credentials', () => {
   const app = setup(), socket = app.connect();
