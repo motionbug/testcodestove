@@ -1,5 +1,5 @@
 name: "Duepi Stove Local MITM & MQTT Controller"
-version: "1.0.5"
+version: "1.0.6"
 slug: "duepi_stove_mitm"
 description: "Local TCP relay / MITM proxy and MQTT Climate Discovery bridge for Duepi (MyDPremote) pellet stoves."
 url: "https://github.com/motionbug/testcodestove"

@@ -141,7 +141,8 @@ class DuepiStoveBridge:
         self.key: bytes = derive_key(self.device_code)
         self.listen_port: int = int(config.get("listen_port", 3000))
         self.poll_interval: int = int(config.get("poll_interval", 15))
-        self.command_delay: float = float(config.get("command_delay", 0.15))
+        self.command_delay: float = float(config.get("command_delay", 0.45))
+        self.connect_delay: float = float(config.get("connect_delay", 1.0 if self.command_delay > 0 else 0.0))
         self.availability_grace: float = float(config.get("availability_grace", 20.0))
 
         # MQTT topics
@@ -170,9 +171,12 @@ class DuepiStoveBridge:
         self.poll_generation = 0
         self.intent_generation = 0
         self.temp_generation: int = 0
+        self.connected_at: float = 0.0
         self.last_command_finished_at: float = 0.0
+        self.last_command_was_write: bool = False
         self.in_grace_period: bool = False
         self._offline_timer_handle: asyncio.TimerHandle | None = None
+        self._rejected_ips: set[str] = set()
         self.requested_power: str | None = None
         self.power_command_status = "idle"
         self.pending_power: dict[str, Any] | None = None
@@ -346,6 +350,7 @@ class DuepiStoveBridge:
                 if self.stove_writer is not None and not self.stove_writer.is_closing():
                     try:
                         await self._poll_locked(self.stove_writer)
+                        self.poll_wakeup_event.clear()
                     except Exception as poll_exc:
                         log.warning("Post-command poll interrupted (%s -> %s): %s", topic, payload, poll_exc)
         except Exception as exc:
@@ -406,12 +411,18 @@ class DuepiStoveBridge:
         async with self.cmd_lock:
             if writer is None or writer is not self.stove_writer or writer.is_closing():
                 raise RuntimeError("Stove TCP socket is not connected")
+            now = monotonic()
+            wait_until = 0.0
+            if self.connect_delay > 0 and self.connected_at > 0:
+                wait_until = max(wait_until, self.connected_at + self.connect_delay)
             if self.command_delay > 0 and self.last_command_finished_at > 0:
-                remaining = self.command_delay - (monotonic() - self.last_command_finished_at)
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
-                    if writer is not self.stove_writer or writer.is_closing():
-                        raise RuntimeError("Stove TCP socket is not connected")
+                spacing = self.command_delay * 2.0 if self.last_command_was_write else self.command_delay
+                wait_until = max(wait_until, self.last_command_finished_at + spacing)
+            remaining = wait_until - now
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+                if writer is not self.stove_writer or writer.is_closing():
+                    raise RuntimeError("Stove TCP socket is not connected")
 
             assert self.loop is not None
             pending = self.loop.create_future()
@@ -422,12 +433,16 @@ class DuepiStoveBridge:
                     log.info("Sending power command: %s", cmd6)
                 writer.write(encrypt_frame(cmd6, self.key))
                 await asyncio.wait_for(writer.drain(), timeout=timeout)
-                body6, valid = await asyncio.wait_for(pending, timeout=timeout)
+                try:
+                    body6, valid = await asyncio.wait_for(pending, timeout=timeout)
+                except asyncio.TimeoutError as exc:
+                    raise asyncio.TimeoutError(f"Timeout waiting for reply to {cmd6}") from exc
                 if not valid or not re.fullmatch(r"[0-9A-Fa-f]{6}", body6):
                     raise ValueError("Invalid stove reply")
                 if cmd6.startswith("RF0") or cmd6 == CMD_GET_POWER:
                     log.info("Stove reply: command=%s body=%s checksum=valid", cmd6, body6)
                 self.last_command_finished_at = monotonic()
+                self.last_command_was_write = cmd6.startswith("RF") or cmd6 == CMD_RESET_ERROR
                 return body6
             except BaseException:
                 # No request IDs exist on this wire protocol. Reconnect after any
@@ -450,6 +465,13 @@ class DuepiStoveBridge:
             writer.close()
             return
         if address != self.stove_ip:
+            addr_str = str(address)
+            if addr_str not in self._rejected_ips:
+                self._rejected_ips.add(addr_str)
+                log.warning(
+                    "Rejected TCP connection from unexpected IP %s (configured stove_ip is %s)",
+                    addr_str, self.stove_ip,
+                )
             writer.close()
             return
 
@@ -480,7 +502,9 @@ class DuepiStoveBridge:
 
         log.info("Stove TCP connection established from %s", peer)
         self.stove_writer = writer
+        self.connected_at = monotonic()
         self.last_command_finished_at = 0.0
+        self.last_command_was_write = False
         self.connected_event.set()
         self.poll_wakeup_event.set()
         self.mqtt.publish(self.availability_topic, "online", qos=1, retain=True)
@@ -737,7 +761,8 @@ def load_config() -> dict[str, Any]:
         "stove_ip": os.environ.get("DUEPI_STOVE_IP", ""),
         "listen_port": int(os.environ.get("LISTEN_PORT", "3000")),
         "poll_interval": int(os.environ.get("POLL_INTERVAL", "15")),
-        "command_delay": float(os.environ.get("COMMAND_DELAY", "0.15")),
+        "command_delay": float(os.environ.get("COMMAND_DELAY", "0.45")),
+        "connect_delay": float(os.environ.get("CONNECT_DELAY", "1.0")),
         "availability_grace": float(os.environ.get("AVAILABILITY_GRACE", "20.0")),
         "mqtt_host": os.environ.get("MQTT_HOST", "localhost"),
         "mqtt_port": int(os.environ.get("MQTT_PORT", "1883")),

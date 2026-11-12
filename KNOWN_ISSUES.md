@@ -1,36 +1,40 @@
 # Validation status and known issues
 
-Snapshot: 2026-11-09, version 1.0.5. Includes Paho compatibility, diagnostic
+Snapshot: 2026-11-12, version 1.0.6. Includes Paho compatibility, diagnostic
 logging, coordinated polling, guarded startup and persistent-mismatch power
-recovery, stale TCP session replacement, inter-command pacing, reconnect command
-delivery within a 20-second availability grace window, and a wrong device code
-warning. Earlier ZIP snapshots are superseded by this sanitized source
-distribution.
+recovery, stale TCP session replacement, post-connect and post-write settle
+delays, `450ms` inter-command pacing, reconnect command delivery within a
+20-second availability grace window, and a wrong device code warning. Earlier
+ZIP snapshots are superseded by this sanitized source distribution.
 
 ## Verified evidence
 
-- 19 Node tests and 40 Python tests; Python suite exercised with Paho 1.6.1 and 2.1.0.
+- 19 Node tests and 41 Python tests; Python suite exercised with Paho 1.6.1 and 2.1.0.
 - A private reference capture previously decoded with 109/109 valid checksums.
   It is intentionally excluded from this distribution.
 - One user installation built/started the Home Assistant app, connected to MQTT,
   published discovery, and received live temperature telemetry.
-- The operator reported Heat/Off working. Logs show a valid P2/P3 command ACK and
-  repeated P4 readbacks alongside ESP8266 5-second TCP reconnect cycles during
-  poll timeouts; version 1.0.5 targets these session/command reliability issues
-  and awaits live hardware validation.
+- The operator reported Heat/Off working. Logs show valid command ACKs and
+  power/temperature readbacks alongside ESP8266 5-second TCP reconnect cycles
+  when poll commands arrive immediately on connect or too soon after a write;
+  versions 1.0.5–1.0.6 target these session/command pacing and reliability
+  issues and await further live hardware validation.
 
 ## Unresolved behavior
 
-- Power selection can change and then revert. P1–P5 maps to stove power, not an
-  independently controlled room fan. Version 1.0.5 preserves `pending_power`
-  across brief TCP reconnects and adds a single guarded resend on persistent
-  readback mismatch (`mismatch_polls >= 2` in `0x02`/`0x04`) in addition to the
-  `0x01`/`0x02` → `0x04` transition; live hardware validation is still required.
+- Power selection can change and then revert, especially during startup phases
+  `0x01`/`0x02` where the stove controller locks power to its ignition recipe.
+  P1–P5 maps to stove power, not an independently controlled room fan. Versions
+  1.0.5–1.0.6 preserve `pending_power` across brief TCP reconnects and add a
+  single guarded resend on persistent readback mismatch (`mismatch_polls >= 2`
+  in `0x02`/`0x04`) in addition to the `0x01`/`0x02` → `0x04` transition; live
+  hardware validation is still required.
 - Some polls, temperature commands, and power commands time out. The bridge closes
   the session after a timeout to prevent late replies satisfying another request,
-  replaces stale sockets immediately when `stove_ip` reconnects, paces commands
-  by `150ms`, and holds availability and user commands across brief reconnects
-  (up to 20s) with at most one delivery retry when no reply was received.
+  replaces stale sockets immediately when `stove_ip` reconnects, waits `1.0s`
+  after TCP connect, paces commands by `450ms` (`900ms` after control writes),
+  and holds availability and user commands across brief reconnects (up to 20s)
+  with at most one delivery retry when no reply was received.
 - Ten-byte unsolicited frames (`\x1b00000000&`) arrive when a TCP connection sits
   idle for ~10 seconds with no command pending. Version 1.0.5 wakes the poll loop
   on reconnect and logs unsolicited 10-byte idle frames at debug level instead of

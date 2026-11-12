@@ -1,6 +1,6 @@
 # Architecture and command flows
 
-Current app: **1.0.5**. Read [known issues](../KNOWN_ISSUES.md) for validation
+Current app: **1.0.6**. Read [known issues](../KNOWN_ISSUES.md) for validation
 limits and [maintenance](MAINTENANCE.md) before changing or publishing code.
 
 ## Connection and discovery
@@ -49,18 +49,19 @@ flowchart TD
 ```
 
 An operation lock prevents whole polls and command verification from interleaving.
-The wire-command lock gives each exchange exclusive reply ownership and enforces
-a `150ms` inter-command delay (`command_delay: 0.15`). Concurrent refreshes
-coalesce after a completed poll; newer queued power or temperature requests
-supersede older ones before writing. Commands arriving when the stove is
-genuinely offline (outside the 20s grace window) are discarded, whereas commands
-arriving during a poll timeout or brief TCP reconnect wait for the replacement
-connection and perform at most one retry if the first write fails before an
-application reply arrives. Once a command receives a valid reply, its follow-up
-verification poll runs in an isolated error boundary so a readback poll timeout
-never erases an acknowledged command. A poll reads status, ambient temperature,
-setpoint, power setting, and error in that order, and reconnects wake the poll
-loop immediately.
+The wire-command lock gives each exchange exclusive reply ownership, waits
+`1.0s` (`connect_delay: 1.0`) after a new TCP connection is established, and
+enforces a `450ms` inter-command delay (`command_delay: 0.45`, doubled to
+`900ms` after control/write commands). Concurrent refreshes coalesce after a
+completed poll; newer queued power or temperature requests supersede older ones
+before writing. Commands arriving when the stove is genuinely offline (outside
+the 20s grace window) are discarded, whereas commands arriving during a poll
+timeout or brief TCP reconnect wait for the replacement connection and perform
+at most one retry if the first write fails before an application reply arrives.
+Once a command receives a valid reply, its follow-up verification poll runs in
+an isolated error boundary so a readback poll timeout never erases an
+acknowledged command. A poll reads status, ambient temperature, setpoint, power
+setting, and error in that order, and reconnects wake the poll loop.
 
 Replies must pass framing, checksum, and payload validation. TCP fragments are
 buffered; coalesced/unsolicited frames cannot satisfy a future request, and

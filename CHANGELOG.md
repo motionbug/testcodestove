@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.6 — 2026-11-12
+
+- Wait `1.0s` (`connect_delay`, default `1.0`s) after a new TCP connection is
+  established before sending the first command so the ESP8266 module finishes
+  post-connect setup before forwarding frames to the stove UART.
+- Increase default inter-command pacing from `150ms` to `450ms` (`command_delay`,
+  default `0.45`s) to match the official app's ~500ms serial cadence, and wait
+  `2x command_delay` (`900ms`) after control/write commands (`RF...` / `RD6000`)
+  before starting the verification readback poll.
+- Clear `poll_wakeup_event` after a completed post-command poll so `poll_loop`
+  does not immediately run a duplicate back-to-back 5-command poll after
+  reconnect command delivery.
+- Include the specific Duepi command code in `TimeoutError` messages
+  (e.g., `Timeout waiting for reply to RD9000`) and log once per unexpected
+  source IP when a TCP connection is rejected by the `stove_ip` allowlist.
+- Add regressions: baseline now 19 Node tests and 41 Python tests, exercised
+  with Paho 1.6.1 and 2.1.0.
+
 ## 1.0.5 — 2026-11-09
 
 - Replace stale TCP sessions immediately when a new connection arrives from the

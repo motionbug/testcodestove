@@ -575,7 +575,23 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         elapsed = asyncio.get_running_loop().time() - t0
         self.assertGreaterEqual(elapsed, 0.03)
 
+        # Write commands (RF...) enforce a 2x command_delay settle pause before the next read.
+        t_write = asyncio.get_running_loop().time()
+        await self.b.send_command('RF0030')
+        await self.b.send_command('RD9000')
+        write_elapsed = asyncio.get_running_loop().time() - t_write
+        self.assertGreaterEqual(write_elapsed, 0.07)
+
+        # Post-connect settle delay paces the first command after TCP connect.
         self.b.command_delay = 0.0
+        self.b.connect_delay = 0.04
+        self.b.connected_at = bridge.monotonic()
+        t_conn = asyncio.get_running_loop().time()
+        await self.b.send_command('RD9000')
+        conn_elapsed = asyncio.get_running_loop().time() - t_conn
+        self.assertGreaterEqual(conn_elapsed, 0.03)
+        self.b.connect_delay = 0.0
+
         self.b.poll_interval = 60
         loop_task = asyncio.create_task(self.b.poll_loop())
         self.tasks.append(loop_task)
@@ -588,6 +604,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         wake_elapsed = asyncio.get_running_loop().time() - t1
         self.assertLess(wake_elapsed, 1.0)
         loop_task.cancel()
+
+    async def test_timeout_includes_command_name_and_unmatched_ip_logs_once(self):
+        reader, _ = await self.connect()
+        with self.assertRaisesRegex(asyncio.TimeoutError, 'Timeout waiting for reply to RD9000'):
+            await self.b.send_command('RD9000', timeout=0.001)
+        with patch.object(bridge.log, 'warning') as warning:
+            await self.connect('192.0.2.99')
+            await self.connect('192.0.2.99')
+        messages = [m for m in self.warnings(warning) if '192.0.2.99' in m]
+        self.assertEqual(len(messages), 1)
 
 
 
